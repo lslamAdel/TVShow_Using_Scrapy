@@ -6,4 +6,7 @@ class TvshowCrawlerItem(scrapy.Item):
     link = scrapy.Field()
     rating = scrapy.Field()
     poster = scrapy.Field()
+    seasons = scrapy.Field()
+    episodes = scrapy.Field()
+    episode_names = scrapy.Field()
 

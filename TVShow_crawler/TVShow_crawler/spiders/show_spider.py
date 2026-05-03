@@ -1,76 +1,100 @@
+import re
 import scrapy
 from TVShow_crawler.items import TvshowCrawlerItem
-from urllib.parse import urljoin
-import requests
 
 
 class ShowSpider(scrapy.Spider):
     name = "shows"
     allowed_domains = ["seriesgraph.com"]
-    start_urls = [
-        "https://seriesgraph.com/all-shows/1"
-    ]
 
-    def parse(self,response):
-        # Find all links to shows
-        show_links = response.css('a[href*="/show/"]')
-        seen_links = set()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._seen_show_links = set()
 
-        for link in show_links:
-            href = link.css('::attr(href)').get()
+    async def start(self):
+        for request in self.start_requests():
+            yield request
 
-            if href and href not in seen_links:
-                seen_links.add(href)
-                full_url = urljoin(response.url, href)
-                
-                # Extract show name from URL slug
-                slug = href.split('/')[-1]
-                if '-' in slug:
-                    showname = slug.split('-', 1)[1].replace('-', ' ').title()
-                else:
-                    showname = slug.title()
+    def start_requests(self):
+        for page_num in range(1, 44):
+            list_url = f"https://seriesgraph.com/all-shows/{page_num}"
+            yield scrapy.Request(list_url, callback=self.parse_show_list)
 
-                if showname and 'seriesgraph.com' in full_url:
-                    item = TvshowCrawlerItem()
-                    item['showname'] = showname
-                    item['link'] = full_url
-
-                    yield scrapy.Request(
-                        full_url,
-                        callback=self.parse_show,
-                        meta={'item':item}
-                    )
+    def parse_show_list(self, response):
+        show_links = response.css('a[href*="/show/"]::attr(href)').getall()
+        for href in show_links:
+            if not href:
+                continue
+            url = response.urljoin(href)
+            if url in self._seen_show_links:
+                continue
+            self._seen_show_links.add(url)
+            yield scrapy.Request(url, callback=self.parse_show)
 
     def parse_show(self, response):
-        item = response.meta['item']
-        
-        slug = response.url.split('/')[-1]
-       
-        # Extract rating
-        rating = response.css('strong::text').get()
-        if rating:
+        item = TvshowCrawlerItem()
+        item["link"] = response.url
 
-            item['rating'] = rating
+        # --- Show name ---
+        showname = response.css("h3::text").get()
+        if showname:
+            item["showname"] = showname.strip()
 
-        #-------------------------------------------------------------------------------------------------------------------------
+        # --- Rating ---
+        # Adjust selector to match the actual rating element on the page
+        rating_text = (
+            response.css(".rating::text").get()
+            or response.css('[class*="rating"]::text').get()
+            or response.css('[class*="score"]::text').get()
+        )
+        if rating_text:
+            match = re.search(r"[\d.]+", rating_text.strip())
+            if match:
+                item["rating"] = float(match.group())
 
-        # Fetch data from API
-        api_url = f'https://seriesgraph.com/api/shows/{slug}'
-        try:
-            api_resp = requests.get(api_url, timeout=5)
-            if api_resp.status_code == 200:
-                data = api_resp.json()
-                
-                
-                # Extract poster
-                poster_path = data.get('poster_path')
-                if poster_path:
-                    # Construct full poster URL from TMDB
-                    poster_url = f'https://image.tmdb.org/t/p/w400{poster_path}'
-                    item['poster'] = poster_url
-        except Exception as e:
-            self.logger.warning(f'Failed to fetch API data for {slug}: {e}')
-        
-        #-------------------------------------------------------------------------------------------------------------------------
+        # --- Poster ---
+        # Tries <img> inside a poster/cover wrapper, falls back to og:image meta tag
+        poster_url = (
+            response.css('[class*="poster"] img::attr(src)').get()
+            or response.css('[class*="cover"] img::attr(src)').get()
+            or response.css('meta[property="og:image"]::attr(content)').get()
+        )
+        if poster_url:
+            item["poster"] = response.urljoin(poster_url)
+
+        # --- Seasons & Episodes ---
+        # Each season block is expected to have a heading and a list of episode rows
+        seasons_data = []
+        season_blocks = response.css('[class*="season"]')
+
+        for season in season_blocks:
+            # Collect episode names within this season block
+            episode_names = [
+                ep.strip()
+                for ep in season.css(
+                    '[class*="episode"] [class*="title"]::text, '
+                    '[class*="episode"] [class*="name"]::text, '
+                    'li [class*="name"]::text, '
+                    'li::text'
+                ).getall()
+                if ep.strip()
+            ]
+            if episode_names:
+                seasons_data.append(episode_names)
+
+        if seasons_data:
+            item["seasons"] = len(seasons_data)
+            item["episodes"] = [len(eps) for eps in seasons_data]
+            item["episode_names"] = seasons_data
+        else:
+            # Fallback: try to read a plain season count from the page
+            season_count_text = (
+                response.css('[class*="seasons"] span::text').get()
+                or response.css('[class*="season-count"]::text').get()
+            )
+            if season_count_text:
+                match = re.search(r"\d+", season_count_text)
+                if match:
+                    item["seasons"] = int(match.group())
+
         yield item
-        
