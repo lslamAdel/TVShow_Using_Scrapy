@@ -9,4 +9,5 @@ class TvshowCrawlerItem(scrapy.Item):
     seasons = scrapy.Field()
     episodes = scrapy.Field()
     episode_names = scrapy.Field()
+    imdb_episodes = scrapy.Field()
 
